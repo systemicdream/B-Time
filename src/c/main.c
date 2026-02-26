@@ -1,5 +1,7 @@
 #include <pebble.h>
 
+#define MAX_CARDS 20  // the maximum number of routes that will be down at a time
+
 static Window *s_main_window;
 static Layer *s_window_layer;
 static TextLayer *s_time_layer; // Layer for displaying the current time
@@ -14,7 +16,7 @@ static Layer *s_separator_layer;
 static char s_detail_buffer[512]; // Buffer for detail text
 
 static int s_card_count = 0;
-static char s_card_buffers[5][256];
+static char s_card_buffers[MAX_CARDS][256];
 
 // Updates the time layer with the current time
 static void update_time() {
@@ -170,11 +172,11 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
         }
 
         // Draw Route Name (Title)
-        graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), 
+        graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
                            GRect(4, 5, bounds.size.w - 8, 28), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Inbound
-        graphics_draw_text(ctx, inbound, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
+        graphics_draw_text(ctx, inbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
                            GRect(4, 35, bounds.size.w - 8, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Separator Line
@@ -182,7 +184,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
         graphics_draw_line(ctx, GPoint(4, 70), GPoint(bounds.size.w - 4, 70));
 
         // Draw Outbound
-        graphics_draw_text(ctx, outbound, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), 
+        graphics_draw_text(ctx, outbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
                            GRect(4, 75, bounds.size.w - 8, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     }
 }
@@ -221,16 +223,16 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         const char *bus_data = bus_tuple->value->cstring;
 
         // Clear previous buffers
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < MAX_CARDS; i++) {
             memset(s_card_buffers[i], 0, sizeof(s_card_buffers[i]));
         }
         s_card_count = 0;
 
-        // Simple approach: just split into 5 cards and display
+        // Simple approach: just split into cards and display (up to MAX_CARDS)
         int card_idx = 0;
         int buf_pos = 0;
 
-        for (size_t i = 0; bus_data[i] != '\0' && card_idx < 5; i++) {
+        for (size_t i = 0; bus_data[i] != '\0' && card_idx < MAX_CARDS; i++) {
             // If we hit a double newline, move to next card
             if (bus_data[i] == '\n' && bus_data[i+1] == '\n') {
                 s_card_count++;
