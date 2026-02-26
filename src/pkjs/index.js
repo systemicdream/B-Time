@@ -117,12 +117,13 @@ Pebble.addEventListener("appmessage", function(e) {
                                 if (!combo) return null;
                                 
                                 var dName = combo.static.dirName || "";
-                                var distMeters = combo.static.distance;
-                                var distFt = Math.round(distMeters * 3.28084);
-                                var distStr = distFt + "ft";
-                                if (distFt > 1320) { // > 0.25 mile
-                                    distStr = (distFt / 5280).toFixed(1) + "mi";
-                                }
+                                // distance removed per user request; no feet will be shown
+                                // var distMeters = combo.static.distance;
+                                // var distFt = Math.round(distMeters * 3.28084);
+                                // var distStr = distFt + "ft";
+                                // if (distFt > 1320) { // > 0.25 mile
+                                //     distStr = (distFt / 5280).toFixed(1) + "mi";
+                                // }
 
                                 var timeStr = "--";
                                 var isLive = false;
@@ -143,7 +144,8 @@ Pebble.addEventListener("appmessage", function(e) {
                                 if (dName.toUpperCase() === "IN" || dName.toUpperCase().indexOf("INBOUND") !== -1) label = "In";
                                 else if (dName.toUpperCase() === "OUT" || dName.toUpperCase().indexOf("OUTBOUND") !== -1) label = "Out";
                                 
-                                return label + ": " + timeStr + " (" + distStr + ")";
+                                // omit distance string entirely
+                                return label + ": " + timeStr;
                             }
 
                             var line1 = "";
