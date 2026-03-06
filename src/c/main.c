@@ -1,6 +1,7 @@
 #include <pebble.h>
 
 #define MAX_CARDS 20  // the maximum number of routes that will be down at a time
+#define MAX_SCHEDULE_ITEMS 25
 
 static Window *s_main_window;
 static Layer *s_window_layer;
@@ -15,8 +16,22 @@ static TextLayer *s_detail_out_layer;
 static Layer *s_separator_layer;
 static char s_detail_buffer[512]; // Buffer for detail text
 
+// Schedule Window (menu for scheduled bus times for selected route)
+static Window *s_schedule_window;
+static MenuLayer *s_schedule_menu_layer;
+static TextLayer *s_schedule_title_layer;
+static int s_selected_route_index = -1;  // Which route was tapped; -1 = none
+static char s_selected_route_number[8] = ""; // Parsed from card title (e.g. "14")
+
 static int s_card_count = 0;
 static char s_card_buffers[MAX_CARDS][256];
+
+static int s_schedule_count = 0;
+static char s_schedule_items[MAX_SCHEDULE_ITEMS][32];
+static char s_schedule_status[32] = "Loading...";
+
+// Forward declarations
+static void send_stop_estimates_request(const char *stop_code, const char *date_str);
 
 // Updates the time layer with the current time
 static void update_time() {
@@ -118,6 +133,112 @@ static void detail_window_unload(Window *window) {
     layer_destroy(s_separator_layer);
 }
 
+// --- Schedule Window (menu for bus times) ---
+
+static uint16_t schedule_get_num_sections_callback(MenuLayer *menu_layer, void *data) {
+    return 1;
+}
+
+static uint16_t schedule_get_num_rows_callback(MenuLayer *menu_layer, uint16_t section_index, void *data) {
+    (void)menu_layer;
+    (void)section_index;
+    (void)data;
+    return (s_schedule_count > 0) ? (uint16_t)s_schedule_count : 1;
+}
+
+static int16_t schedule_get_cell_height_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+    (void)menu_layer;
+    (void)cell_index;
+    (void)data;
+    return 44;
+}
+
+static void schedule_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
+    (void)data;
+    GRect bounds = layer_get_bounds(cell_layer);
+
+    const char *text = NULL;
+    if (s_schedule_count > 0) {
+        if (cell_index->row < s_schedule_count) {
+            text = s_schedule_items[cell_index->row];
+        }
+    } else {
+        text = (s_schedule_status[0] != '\0') ? s_schedule_status : "Loading...";
+    }
+
+    graphics_draw_text(ctx, text ? text : "",
+                       fonts_get_system_font(FONT_KEY_GOTHIC_24),
+                       GRect(4, 8, bounds.size.w - 8, bounds.size.h - 8),
+                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+}
+
+static void schedule_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
+    (void)menu_layer;
+    (void)cell_index;
+    (void)data;
+    // TODO: handle tap on a time row when we have schedule data
+}
+
+static void schedule_window_load(Window *window) {
+    Layer *window_layer = window_get_root_layer(window);
+    GRect bounds = layer_get_bounds(window_layer);
+
+    window_set_background_color(window, GColorBlack);
+
+    const int title_height = 28;
+
+    // Title: show selected route name
+    static char title_buf[64] = "Schedule";
+    if (s_selected_route_index >= 0 && s_selected_route_index < s_card_count) {
+        const char *card = s_card_buffers[s_selected_route_index];
+        char *first_nl = strchr(card, '\n');
+        if (first_nl) {
+            int len = first_nl - card;
+            if (len > (int)sizeof(title_buf) - 1) len = sizeof(title_buf) - 1;
+            strncpy(title_buf, card, len);
+            title_buf[len] = '\0';
+        } else {
+            strncpy(title_buf, card, sizeof(title_buf) - 1);
+            title_buf[sizeof(title_buf) - 1] = '\0';
+        }
+    }
+
+    s_schedule_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, title_height));
+    text_layer_set_text(s_schedule_title_layer, title_buf);
+    text_layer_set_font(s_schedule_title_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+    text_layer_set_text_alignment(s_schedule_title_layer, GTextAlignmentCenter);
+    text_layer_set_background_color(s_schedule_title_layer, GColorBlack);
+    text_layer_set_text_color(s_schedule_title_layer, GColorWhite);
+    layer_add_child(window_layer, text_layer_get_layer(s_schedule_title_layer));
+
+    s_schedule_menu_layer = menu_layer_create(GRect(0, title_height, bounds.size.w, bounds.size.h - title_height));
+    menu_layer_set_callbacks(s_schedule_menu_layer, NULL, (MenuLayerCallbacks){
+        .get_num_sections = schedule_get_num_sections_callback,
+        .get_num_rows = schedule_get_num_rows_callback,
+        .get_cell_height = schedule_get_cell_height_callback,
+        .draw_row = schedule_draw_row_callback,
+        .select_click = schedule_select_callback,
+    });
+    menu_layer_set_click_config_onto_window(s_schedule_menu_layer, window);
+    layer_add_child(window_layer, menu_layer_get_layer(s_schedule_menu_layer));
+
+    // Start loading schedule
+    s_schedule_count = 0;
+    strncpy(s_schedule_status, "Loading...", sizeof(s_schedule_status) - 1);
+    s_schedule_status[sizeof(s_schedule_status) - 1] = '\0';
+    menu_layer_reload_data(s_schedule_menu_layer);
+
+    // For now: fixed stopCode/date per request
+    send_stop_estimates_request("173", "2026-03-03");
+}
+
+static void schedule_window_unload(Window *window) {
+    text_layer_destroy(s_schedule_title_layer);
+    menu_layer_destroy(s_schedule_menu_layer);
+    s_schedule_title_layer = NULL;
+    s_schedule_menu_layer = NULL;
+}
+
 // --- Menu Handlers ---
 
 // Menu callback: Get number of sections
@@ -192,12 +313,22 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
 // Menu callback: Select row
 static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
     if (cell_index->row < s_card_count) {
-        // Copy the full text to the detail buffer
-        strncpy(s_detail_buffer, s_card_buffers[cell_index->row], sizeof(s_detail_buffer) - 1);
-        s_detail_buffer[sizeof(s_detail_buffer) - 1] = '\0'; // Ensure null-termination
-        
-        // Push the detail window
-        window_stack_push(s_detail_window, true);
+        s_selected_route_index = (int)cell_index->row;
+
+        // Parse route number from the card title ("14 Park/Forest/MLK" => "14")
+        s_selected_route_number[0] = '\0';
+        const char *card = s_card_buffers[s_selected_route_index];
+        if (card) {
+            int out_i = 0;
+            for (int i = 0; card[i] != '\0' && card[i] != ' ' && card[i] != '\n'; i++) {
+                if (out_i < (int)sizeof(s_selected_route_number) - 1) {
+                    s_selected_route_number[out_i++] = card[i];
+                }
+            }
+            s_selected_route_number[out_i] = '\0';
+        }
+
+        window_stack_push(s_schedule_window, true);
     }
 }
 
@@ -214,9 +345,26 @@ static void send_location_request(void) {
     }
 }
 
+// Sends a message to the JS side to request stop estimates for a stopCode/date
+static void send_stop_estimates_request(const char *stop_code, const char *date_str) {
+    DictionaryIterator *out_iter;
+    AppMessageResult result = app_message_outbox_begin(&out_iter);
+
+    if (result == APP_MSG_OK) {
+        dict_write_uint8(out_iter, 100, 1);
+        dict_write_cstring(out_iter, 101, stop_code);
+        dict_write_cstring(out_iter, 102, date_str);
+        if (s_selected_route_number[0] != '\0') {
+            dict_write_cstring(out_iter, 103, s_selected_route_number);
+        }
+        app_message_outbox_send();
+    }
+}
+
 // Handles incoming messages from the JS side, parses the bus data string into cards, and updates the UI
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
     Tuple *bus_tuple = dict_find(iterator, 2);
+    Tuple *schedule_tuple = dict_find(iterator, 3);
 
     if (bus_tuple) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Got message: %s", bus_tuple->value->cstring);
@@ -269,8 +417,58 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         // Reload menu data
         menu_layer_reload_data(s_menu_layer);
 
-    } else {
-        APP_LOG(APP_LOG_LEVEL_ERROR, "No bus_tuple found");
+    } else if (!schedule_tuple) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "No known tuple found");
+    }
+
+    if (schedule_tuple) {
+        APP_LOG(APP_LOG_LEVEL_INFO, "Got schedule: %s", schedule_tuple->value->cstring);
+        const char *sched = schedule_tuple->value->cstring;
+
+        // Clear previous schedule
+        for (int i = 0; i < MAX_SCHEDULE_ITEMS; i++) {
+            memset(s_schedule_items[i], 0, sizeof(s_schedule_items[i]));
+        }
+        s_schedule_count = 0;
+
+        if (!sched || strlen(sched) == 0) {
+            strncpy(s_schedule_status, "No data", sizeof(s_schedule_status) - 1);
+            s_schedule_status[sizeof(s_schedule_status) - 1] = '\0';
+        } else {
+            // Split into rows by '\n'
+            int item_idx = 0;
+            int buf_pos = 0;
+
+            for (size_t i = 0; sched[i] != '\0' && item_idx < MAX_SCHEDULE_ITEMS; i++) {
+                if (sched[i] == '\n') {
+                    if (buf_pos > 0) {
+                        s_schedule_count++;
+                        item_idx++;
+                        buf_pos = 0;
+                    }
+                    continue;
+                }
+
+                if (buf_pos < (int)sizeof(s_schedule_items[0]) - 1) {
+                    s_schedule_items[item_idx][buf_pos++] = sched[i];
+                }
+            }
+
+            if (buf_pos > 0 && item_idx < MAX_SCHEDULE_ITEMS) {
+                s_schedule_count++;
+            }
+
+            if (s_schedule_count == 0) {
+                strncpy(s_schedule_status, "No upcoming buses", sizeof(s_schedule_status) - 1);
+                s_schedule_status[sizeof(s_schedule_status) - 1] = '\0';
+            } else {
+                s_schedule_status[0] = '\0';
+            }
+        }
+
+        if (s_schedule_menu_layer) {
+            menu_layer_reload_data(s_schedule_menu_layer);
+        }
     }
 }
 
@@ -354,6 +552,13 @@ static void init(void) {
         .unload = detail_window_unload,
     });
 
+    // Create Schedule Window (menu for scheduled times per route)
+    s_schedule_window = window_create();
+    window_set_window_handlers(s_schedule_window, (WindowHandlers) {
+        .load = schedule_window_load,
+        .unload = schedule_window_unload,
+    });
+
     window_stack_push(s_main_window, true);
 
     // Register with TickTimerService
@@ -372,6 +577,7 @@ static void init(void) {
 static void deinit(void) {
     window_destroy(s_main_window);
     window_destroy(s_detail_window);
+    window_destroy(s_schedule_window);
 }
 
 // The application entry point
