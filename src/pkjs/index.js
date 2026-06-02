@@ -10,6 +10,15 @@ var lastRouteStopCodes = {};
 Pebble.addEventListener("appmessage", function(e) {
     console.log("Got appmessage from watch: " + JSON.stringify(e && e.payload ? e.payload : {}));
 
+    function fmtMins(mins, realtime) {
+        var suffix = realtime ? "*" : "";
+        if (mins < 1) return "Now" + suffix;
+        if (mins < 60) return mins + "m" + suffix;
+        var h = Math.floor(mins / 60);
+        var m = mins % 60;
+        return h + ":" + String(m).padStart(2, "0") + suffix;
+    }
+
     function requestNearbyRoutesAndTimes() {
         navigator.geolocation.getCurrentPosition(function(pos) {
             var lat = pos.coords.latitude;
@@ -146,8 +155,7 @@ Pebble.addEventListener("appmessage", function(e) {
                                         if (tVal) {
                                             var ms = new Date(tVal) - new Date();
                                             var mins = Math.round(ms / 60000);
-                                            timeStr = mins + "m";
-                                            if (nt.isRealtime) timeStr += "*";
+                                            timeStr = fmtMins(mins, nt.isRealtime);
                                         }
                                     }
 
@@ -281,7 +289,7 @@ Pebble.addEventListener("appmessage", function(e) {
                     var mins = Math.round((dep - now) / 60000);
                     if (mins < -5) continue;
 
-                    var label = mins < 0 ? "Now" : (mins + "m" + (st.isRealtime ? "*" : ""));
+                    var label = fmtMins(mins, st.isRealtime);
                     lines.push({ mins: mins, text: routeLabel + " " + label });
                     if (lines.length >= 50) break;
                 }
