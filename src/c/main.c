@@ -30,9 +30,6 @@ static int s_schedule_count = 0;
 static char s_schedule_items[MAX_SCHEDULE_ITEMS][32];
 static char s_schedule_status[32] = "Loading...";
 
-// Forward declarations
-static void send_stop_estimates_request(const char *stop_code, const char *date_str);
-
 // Updates the time layer with the current time
 static void update_time() {
     time_t temp = time(NULL);
@@ -179,6 +176,48 @@ static void schedule_select_callback(MenuLayer *menu_layer, MenuIndex *cell_inde
     // TODO: handle tap on a time row when we have schedule data
 }
 
+#ifdef PBL_COLOR
+static GColor get_route_color(const char *route_number) {
+    if (strcmp(route_number, "2") == 0) return GColorFromHEX(0x724D00);
+    if (strcmp(route_number, "3") == 0) return GColorFromHEX(0x61A4D5);
+    if (strcmp(route_number, "4") == 0) return GColorFromHEX(0x91BC64);
+    if (strcmp(route_number, "5") == 0) return GColorFromHEX(0xB15F51);
+    if (strcmp(route_number, "7") == 0) return GColorFromHEX(0xCF896F);
+    if (strcmp(route_number, "8") == 0) return GColorFromHEX(0x9574B1);
+    if (strcmp(route_number, "9") == 0) return GColorFromHEX(0x9574B1);
+    if (strcmp(route_number, "9c") == 0) return GColorFromHEX(0x9574B1);
+    if (strcmp(route_number, "14") == 0) return GColorFromHEX(0x9574B1);
+    if (strcmp(route_number, "15") == 0) return GColorFromHEX(0x077239);
+    if (strcmp(route_number, "16") == 0) return GColorFromHEX(0xFDBE16);
+    if (strcmp(route_number, "17") == 0) return GColorFromHEX(0xA97A10);
+    if (strcmp(route_number, "20") == 0) return GColorFromHEX(0xEA2327);
+    if (strcmp(route_number, "24") == 0) return GColorFromHEX(0x0A984A);
+    if (strcmp(route_number, "25") == 0) return GColorFromHEX(0x068AC7);
+    if (strcmp(route_number, "26") == 0) return GColorFromHEX(0x7861A7);
+    if (strcmp(route_number, "27") == 0) return GColorFromHEX(0xCD0779);
+    if (strcmp(route_number, "30") == 0) return GColorFromHEX(0xF59C1F);
+    if (strcmp(route_number, "32") == 0) return GColorFromHEX(0x684F47);
+    if (strcmp(route_number, "41") == 0) return GColorFromHEX(0x4D6DA8);
+    return GColorWhite;
+}
+#endif
+
+// Sends a message to the JS side to request stop estimates for a stopCode/date
+static void send_stop_estimates_request(const char *stop_code, const char *date_str) {
+    DictionaryIterator *out_iter;
+    AppMessageResult result = app_message_outbox_begin(&out_iter);
+
+    if (result == APP_MSG_OK) {
+        dict_write_uint8(out_iter, 100, 1);
+        dict_write_cstring(out_iter, 101, stop_code);
+        dict_write_cstring(out_iter, 102, date_str);
+        if (s_selected_route_number[0] != '\0') {
+            dict_write_cstring(out_iter, 103, s_selected_route_number);
+        }
+        app_message_outbox_send();
+    }
+}
+
 static void schedule_window_load(Window *window) {
     Layer *window_layer = window_get_root_layer(window);
     GRect bounds = layer_get_bounds(window_layer);
@@ -207,8 +246,19 @@ static void schedule_window_load(Window *window) {
     text_layer_set_text(s_schedule_title_layer, title_buf);
     text_layer_set_font(s_schedule_title_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_text_alignment(s_schedule_title_layer, GTextAlignmentCenter);
+#ifdef PBL_COLOR
+    if (s_selected_route_number[0] != '\0') {
+        GColor sched_color = get_route_color(s_selected_route_number);
+        text_layer_set_background_color(s_schedule_title_layer, sched_color);
+        text_layer_set_text_color(s_schedule_title_layer, GColorBlack);
+    } else {
+        text_layer_set_background_color(s_schedule_title_layer, GColorBlack);
+        text_layer_set_text_color(s_schedule_title_layer, GColorWhite);
+    }
+#else
     text_layer_set_background_color(s_schedule_title_layer, GColorBlack);
     text_layer_set_text_color(s_schedule_title_layer, GColorWhite);
+#endif
     layer_add_child(window_layer, text_layer_get_layer(s_schedule_title_layer));
 
     s_schedule_menu_layer = menu_layer_create(GRect(0, title_height, bounds.size.w, bounds.size.h - title_height));
@@ -292,21 +342,53 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
             title[sizeof(title) - 1] = '\0';
         }
 
+        int left_pad = 4;
+#ifdef PBL_COLOR
+        // Extract route number from title (before first space)
+        char route_number[8] = "";
+        int rn_len = 0;
+        for (int i = 0; title[i] != '\0' && title[i] != ' ' && rn_len < (int)sizeof(route_number) - 1; i++) {
+            route_number[rn_len++] = title[i];
+        }
+        route_number[rn_len] = '\0';
+
+        GColor route_color = get_route_color(route_number);
+        if (menu_cell_layer_is_highlighted(cell_layer)) {
+            // Full route color highlight
+            graphics_context_set_fill_color(ctx, route_color);
+            graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+            graphics_context_set_text_color(ctx, GColorWhite);
+        } else {
+            // Route color bar for normal state
+            graphics_context_set_fill_color(ctx, route_color);
+            graphics_fill_rect(ctx, GRect(0, 0, 6, bounds.size.h), 0, GCornerNone);
+            left_pad = 10;
+        }
+#endif
+
         // Draw Route Name (Title)
         graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
-                           GRect(4, 5, bounds.size.w - 8, 28), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                           GRect(left_pad, 5, bounds.size.w - left_pad - 4, 28), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Inbound
         graphics_draw_text(ctx, inbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
-                           GRect(4, 35, bounds.size.w - 8, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                           GRect(left_pad, 35, bounds.size.w - left_pad - 4, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Separator Line
+#ifdef PBL_COLOR
+        if (menu_cell_layer_is_highlighted(cell_layer)) {
+            graphics_context_set_stroke_color(ctx, GColorWhite);
+        } else {
+            graphics_context_set_stroke_color(ctx, GColorBlack);
+        }
+#else
         graphics_context_set_stroke_color(ctx, menu_cell_layer_is_highlighted(cell_layer) ? GColorWhite : GColorBlack);
-        graphics_draw_line(ctx, GPoint(4, 70), GPoint(bounds.size.w - 4, 70));
+#endif
+        graphics_draw_line(ctx, GPoint(left_pad, 70), GPoint(bounds.size.w - 4, 70));
 
         // Draw Outbound
         graphics_draw_text(ctx, outbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
-                           GRect(4, 75, bounds.size.w - 8, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+                           GRect(left_pad, 75, bounds.size.w - left_pad - 4, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     }
 }
 
@@ -341,22 +423,6 @@ static void send_location_request(void) {
 
     if (result == APP_MSG_OK) {
         dict_write_uint8(out_iter, 99, 1);
-        app_message_outbox_send();
-    }
-}
-
-// Sends a message to the JS side to request stop estimates for a stopCode/date
-static void send_stop_estimates_request(const char *stop_code, const char *date_str) {
-    DictionaryIterator *out_iter;
-    AppMessageResult result = app_message_outbox_begin(&out_iter);
-
-    if (result == APP_MSG_OK) {
-        dict_write_uint8(out_iter, 100, 1);
-        dict_write_cstring(out_iter, 101, stop_code);
-        dict_write_cstring(out_iter, 102, date_str);
-        if (s_selected_route_number[0] != '\0') {
-            dict_write_cstring(out_iter, 103, s_selected_route_number);
-        }
         app_message_outbox_send();
     }
 }
