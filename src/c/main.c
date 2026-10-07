@@ -109,7 +109,7 @@ static GColor get_route_color(const char *route_number) {
     if (strcmp(route_number, "7") == 0) return GColorFromHEX(0xCF896F);
     if (strcmp(route_number, "8") == 0) return GColorFromHEX(0x9574B1);
     if (strcmp(route_number, "9") == 0) return GColorFromHEX(0x9574B1);
-    if (strcmp(route_number, "9c") == 0) return GColorFromHEX(0x9574B1);
+    if (strcmp(route_number, "9C") == 0) return GColorFromHEX(0x9574B1);
     if (strcmp(route_number, "14") == 0) return GColorFromHEX(0x9574B1);
     if (strcmp(route_number, "15") == 0) return GColorFromHEX(0x077239);
     if (strcmp(route_number, "16") == 0) return GColorFromHEX(0xFDBE16);
@@ -122,7 +122,8 @@ static GColor get_route_color(const char *route_number) {
     if (strcmp(route_number, "30") == 0) return GColorFromHEX(0xF59C1F);
     if (strcmp(route_number, "32") == 0) return GColorFromHEX(0x684F47);
     if (strcmp(route_number, "41") == 0) return GColorFromHEX(0x4D6DA8);
-    return GColorWhite;
+    // Unlisted routes still need a color that shows up as a highlight on the white menu
+    return GColorDarkGray;
 }
 #endif
 

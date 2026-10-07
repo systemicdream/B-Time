@@ -20,6 +20,8 @@ Pebble.addEventListener("ready", function() {
 
 // Persist across appmessage: routeNumber -> array of stopCodes from last GetNearbyRoutes (IN and OUT)
 var lastRouteStopCodes = {};
+// routeNumber -> [{ label, stopTime }] from the last GetNextStopTimes, the schedule view's fallback
+var lastRouteNextTimes = {};
 
 // --- Messaging ---
 
@@ -147,19 +149,31 @@ function dirLabel(directionName) {
     return name;
 }
 
-// One card line for a direction, e.g. "In: 5m*" ("--" when there is no upcoming bus)
+// One card line for a direction, e.g. "In: 5m*" ("--" when there is no upcoming bus).
+// Returns { text, mins } where mins is null when there is no upcoming bus.
 function formatLine(combo, now) {
     var timeStr = "--";
+    var mins = null;
     var times = combo.time.nextStopTimes || [];
     for (var i = 0; i < times.length; i++) {
         var until = minutesUntil(times[i], now);
         // Skip buses that have already left
         if (until && until.mins >= 0) {
             timeStr = fmtMins(until.mins, until.realtime);
+            mins = until.mins;
             break;
         }
     }
-    return (dirLabel(combo.static.dirName) || "?") + ": " + timeStr;
+    return { text: (dirLabel(combo.static.dirName) || "?") + ": " + timeStr, mins: mins };
+}
+
+// Orders route numbers numerically, then by suffix: "9" < "9C" < "14"
+function compareRouteNumbers(a, b) {
+    var numA = parseInt(a, 10);
+    var numB = parseInt(b, 10);
+    if (isNaN(numA) !== isNaN(numB)) return isNaN(numA) ? 1 : -1;
+    if (!isNaN(numA) && numA !== numB) return numA - numB;
+    return a < b ? -1 : (a > b ? 1 : 0);
 }
 
 // --- Nearby routes (main list) ---
@@ -167,9 +181,9 @@ function formatLine(combo, now) {
 function buildCards(routesForRequest, routeMap, timesData) {
     var now = new Date();
     var cards = [];
+    var nextTimes = {};
 
-    // Iterate over the original routes to maintain order
-    for (var i = 0; i < routesForRequest.length && cards.length < MAX_CARDS; i++) {
+    for (var i = 0; i < routesForRequest.length; i++) {
         var rKey = routesForRequest[i].routeKey;
         var staticInfo = routeMap[rKey];
 
@@ -197,6 +211,14 @@ function buildCards(routesForRequest, routeMap, timesData) {
 
             var combo = { static: staticStop, time: ts };
             var label = dirLabel(staticStop.dirName);
+
+            // Remember every upcoming time for this route's schedule view
+            var routeNumber = String(staticInfo.number).trim();
+            var upcoming = ts.nextStopTimes || [];
+            for (var n = 0; n < upcoming.length; n++) {
+                if (!nextTimes[routeNumber]) nextTimes[routeNumber] = [];
+                nextTimes[routeNumber].push({ label: label, stopTime: upcoming[n] });
+            }
             if (label === "In" && !inStop) {
                 inStop = combo;
             } else if (label === "Out" && !outStop) {
@@ -212,7 +234,7 @@ function buildCards(routesForRequest, routeMap, timesData) {
         } else if (otherStops.length > 0) {
             line1 = formatLine(otherStops.shift(), now);
         } else {
-            line1 = "In: No Stop";
+            line1 = { text: "In: No Stop", mins: null };
         }
 
         var line2;
@@ -221,13 +243,28 @@ function buildCards(routesForRequest, routeMap, timesData) {
         } else if (otherStops.length > 0) {
             line2 = formatLine(otherStops.shift(), now);
         } else {
-            line2 = "Out: No Stop";
+            line2 = { text: "Out: No Stop", mins: null };
         }
 
-        cards.push(staticInfo.number + " " + staticInfo.name + "\n" + line1 + "\n" + line2);
+        // Soonest of the two directions; Infinity when neither has an upcoming bus
+        var soonest = Math.min(line1.mins === null ? Infinity : line1.mins,
+                               line2.mins === null ? Infinity : line2.mins);
+        cards.push({
+            soonest: soonest,
+            number: String(staticInfo.number).trim(),
+            text: staticInfo.number + " " + staticInfo.name + "\n" + line1.text + "\n" + line2.text
+        });
     }
 
-    return cards;
+    lastRouteNextTimes = nextTimes;
+
+    // Soonest bus first, ties (and routes with no upcoming bus) by route number
+    cards.sort(function(a, b) {
+        if (a.soonest !== b.soonest) return a.soonest < b.soonest ? -1 : 1;
+        return compareRouteNumbers(a.number, b.number);
+    });
+
+    return cards.slice(0, MAX_CARDS).map(function(c) { return c.text; });
 }
 
 function requestNearbyRoutesAndTimes() {
@@ -329,41 +366,83 @@ function requestNearbyRoutesAndTimes() {
 // --- Stop estimates (schedule view for one route) ---
 
 function requestStopEstimates(stopCodes, dateStr, routeNumber) {
-    var pending = stopCodes.length;
+    var requests = stopCodes.length * 2; // schedule + realtime estimates per stop
+    var pending = requests;
     var failed = 0;
-    var mergedSchedules = [];
+    var schedules = [];
+    var estimates = [];
 
-    function maybeDone() {
-        pending--;
-        if (pending > 0) return;
+    function addLine(lines, seen, label, stopTime, now) {
+        var until = minutesUntil(stopTime, now);
+        if (!until || until.mins < 0) return;
+        if (seen[label + "|" + until.mins]) return;
 
-        if (failed === stopCodes.length) {
-            sendSchedule("Network Error", routeNumber);
-            return;
-        }
+        seen[label + "|" + until.mins] = true;
+        lines.push({
+            mins: until.mins,
+            text: (label ? label + ": " : "") + fmtMins(until.mins, until.realtime)
+        });
+    }
 
-        console.log("Got stop estimates: " + mergedSchedules.length + " schedules");
+    // These stops serve other routes too; only keep the selected one
+    function forRoute(list) {
+        return list.filter(function(s) {
+            return s.stopTimes && s.routeNumber != null && String(s.routeNumber).trim() === routeNumber;
+        });
+    }
+
+    function finish() {
+        console.log("Got " + schedules.length + " schedules, " + estimates.length + " estimates");
 
         var now = new Date();
         var lines = [];
+        var seen = {}; // "label|mins" already listed
+        var i, j;
 
-        for (var i = 0; i < mergedSchedules.length; i++) {
-            var s = mergedSchedules[i];
-            if (!s.stopTimes || s.routeNumber == null) continue;
-            // These stops serve other routes too; only keep the selected one
-            if (String(s.routeNumber).trim() !== routeNumber) continue;
-
-            var label = dirLabel(s.directionName);
-
-            for (var j = 0; j < s.stopTimes.length; j++) {
-                var until = minutesUntil(s.stopTimes[j], now);
-                if (!until || until.mins < 0) continue;
-
-                lines.push({
-                    mins: until.mins,
-                    text: (label ? label + ": " : "") + fmtMins(until.mins, until.realtime)
-                });
+        // Realtime estimates by trip, to overlay on the day's schedule
+        var routeEstimates = forRoute(estimates);
+        var estimateByTrip = {};
+        for (i = 0; i < routeEstimates.length; i++) {
+            for (j = 0; j < routeEstimates[i].stopTimes.length; j++) {
+                var est = routeEstimates[i].stopTimes[j];
+                if (est && est.tripPointId) estimateByTrip[est.tripPointId] = est;
             }
+        }
+
+        var usedTrips = {};
+        var routeSchedules = forRoute(schedules);
+        for (i = 0; i < routeSchedules.length; i++) {
+            var label = dirLabel(routeSchedules[i].directionName);
+            for (j = 0; j < routeSchedules[i].stopTimes.length; j++) {
+                var stopTime = routeSchedules[i].stopTimes[j];
+                if (!stopTime || stopTime.isCancelled) continue;
+
+                var live = stopTime.tripPointId ? estimateByTrip[stopTime.tripPointId] : null;
+                if (live) usedTrips[stopTime.tripPointId] = true;
+                addLine(lines, seen, label, (live && !live.isCancelled) ? live : stopTime, now);
+            }
+        }
+
+        // Estimates for trips the schedule didn't list (or when the schedule failed to load)
+        for (i = 0; i < routeEstimates.length; i++) {
+            for (j = 0; j < routeEstimates[i].stopTimes.length; j++) {
+                var extra = routeEstimates[i].stopTimes[j];
+                if (!extra || extra.isCancelled || usedTrips[extra.tripPointId]) continue;
+                addLine(lines, seen, dirLabel(routeEstimates[i].directionName), extra, now);
+            }
+        }
+
+        // Nothing loaded: fall back to the upcoming times the route list already showed
+        if (lines.length === 0) {
+            var cached = lastRouteNextTimes[routeNumber] || [];
+            for (i = 0; i < cached.length; i++) {
+                addLine(lines, seen, cached[i].label, cached[i].stopTime, now);
+            }
+        }
+
+        if (lines.length === 0 && requests > 0 && failed === requests) {
+            sendSchedule("Network Error", routeNumber);
+            return;
         }
 
         // Sort by time so IN and OUT are interleaved by departure time
@@ -373,17 +452,32 @@ function requestStopEstimates(stopCodes, dateStr, routeNumber) {
         sendSchedule(outLines.length > 0 ? outLines.join("\n") : "No upcoming buses", routeNumber);
     }
 
-    stopCodes.forEach(function(stopCode) {
-        postJson("/Schedule/GetStopEstimates", { stopCode: String(stopCode), date: dateStr }, function(data) {
+    function maybeDone() {
+        pending--;
+        if (pending <= 0) finish();
+    }
+
+    function load(path, stopCode, into) {
+        postJson(path, { stopCode: String(stopCode), date: dateStr }, function(data) {
             var list = (data && data.routeStopSchedules) ? data.routeStopSchedules : [];
             for (var i = 0; i < list.length; i++) {
-                if (list[i]) mergedSchedules.push(list[i]);
+                if (list[i]) into.push(list[i]);
             }
             maybeDone();
         }, function() {
             failed++;
             maybeDone();
         });
+    }
+
+    if (requests === 0) {
+        finish();
+        return;
+    }
+
+    stopCodes.forEach(function(stopCode) {
+        load("/Schedule/GetStopSchedules", stopCode, schedules);
+        load("/Schedule/GetStopEstimates", stopCode, estimates);
     });
 }
 
@@ -403,10 +497,6 @@ Pebble.addEventListener("appmessage", function(e) {
 
         // Use all stop codes for this route (IN + OUT) from the last nearby fetch
         var stopCodes = lastRouteStopCodes[routeNumber] || [];
-        if (stopCodes.length === 0) {
-            sendSchedule("No upcoming buses", routeNumber);
-            return;
-        }
 
         // Always use today's date for the API so we get upcoming times
         var d = new Date();
