@@ -3,18 +3,21 @@
 #define MAX_CARDS 20  // the maximum number of routes that will be down at a time
 #define MAX_SCHEDULE_ITEMS 25
 
+// AppMessage keys (must match src/pkjs/index.js)
+#define KEY_CARDS 2
+#define KEY_SCHEDULE 3
+#define KEY_STATUS 4
+#define KEY_REQUEST_NEARBY 99
+#define KEY_REQUEST_SCHEDULE 100
+#define KEY_ROUTE 103
+
+#define SCHEDULE_RETRY_MS 500
+
 static Window *s_main_window;
 static Layer *s_window_layer;
 static TextLayer *s_time_layer; // Layer for displaying the current time
 static TextLayer *s_status_layer;
 static MenuLayer *s_menu_layer; // MenuLayer for displaying routes
-
-// Detail Window elements
-static Window *s_detail_window;
-static TextLayer *s_detail_in_layer;
-static TextLayer *s_detail_out_layer;
-static Layer *s_separator_layer;
-static char s_detail_buffer[512]; // Buffer for detail text
 
 // Schedule Window (menu for scheduled bus times for selected route)
 static Window *s_schedule_window;
@@ -25,10 +28,12 @@ static char s_selected_route_number[8] = ""; // Parsed from card title (e.g. "14
 
 static int s_card_count = 0;
 static char s_card_buffers[MAX_CARDS][256];
+static char s_status_buffer[64] = "Loading...";
 
 static int s_schedule_count = 0;
 static char s_schedule_items[MAX_SCHEDULE_ITEMS][32];
 static char s_schedule_status[32] = "Loading...";
+static AppTimer *s_schedule_retry_timer;
 
 // Updates the time layer with the current time
 static void update_time() {
@@ -39,95 +44,14 @@ static void update_time() {
     static char s_time_buffer[8];
     strftime(s_time_buffer, sizeof(s_time_buffer), clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
 
-    text_layer_set_text(s_time_layer, s_time_buffer);
+    // Drop the leading zero in 12h mode ("09:24" => "9:24")
+    bool skip_zero = !clock_is_24h_style() && s_time_buffer[0] == '0';
+    text_layer_set_text(s_time_layer, skip_zero ? s_time_buffer + 1 : s_time_buffer);
 }
 
 // Handler for time tick events (every minute)
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
-}
-
-// --- Detail Window Handlers ---
-
-static void separator_update_proc(Layer *layer, GContext *ctx) {
-    GRect bounds = layer_get_bounds(layer);
-    graphics_context_set_stroke_color(ctx, GColorWhite);
-    graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
-    graphics_draw_line(ctx, GPoint(0, 1), GPoint(bounds.size.w, 1));
-}
-
-static void detail_window_load(Window *window) {
-    Layer *window_layer = window_get_root_layer(window);
-    GRect bounds = layer_get_bounds(window_layer);
-
-    // Set black background
-    window_set_background_color(window, GColorBlack);
-
-    int half_height = bounds.size.h / 2;
-
-    // Parse the buffer
-    // Expected format: "Route Name\nInbound Info\nOutbound Info"
-    static char s_in_buffer[256];
-    static char s_out_buffer[256];
-    
-    // Default values
-    strcpy(s_in_buffer, "Inbound Info");
-    strcpy(s_out_buffer, "Outbound Info");
-
-    char *first_newline = strchr(s_detail_buffer, '\n');
-    if (first_newline) {
-        // Find second newline (start of Outbound)
-        char *second_newline = strchr(first_newline + 1, '\n');
-        
-        if (second_newline) {
-            // Copy Route Name + Inbound to in_buffer
-            int in_len = second_newline - s_detail_buffer;
-            strncpy(s_in_buffer, s_detail_buffer, in_len);
-            s_in_buffer[in_len] = '\0';
-            
-            // Copy Outbound to out_buffer
-            strcpy(s_out_buffer, second_newline + 1);
-        } else {
-            // Only one newline? Just put everything in top? Or duplicate?
-            // Let's assume the format is maintained or just put all in top.
-            strcpy(s_in_buffer, s_detail_buffer);
-            s_out_buffer[0] = '\0';
-        }
-    } else {
-        strcpy(s_in_buffer, s_detail_buffer);
-        s_out_buffer[0] = '\0';
-    }
-
-    // Top Layer (Inbound)
-    s_detail_in_layer = text_layer_create(GRect(4, 4, bounds.size.w - 8, half_height - 8));
-    text_layer_set_text(s_detail_in_layer, s_in_buffer);
-    text_layer_set_font(s_detail_in_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
-    text_layer_set_text_alignment(s_detail_in_layer, GTextAlignmentCenter);
-    text_layer_set_overflow_mode(s_detail_in_layer, GTextOverflowModeWordWrap);
-    text_layer_set_background_color(s_detail_in_layer, GColorBlack);
-    text_layer_set_text_color(s_detail_in_layer, GColorWhite);
-    layer_add_child(window_layer, text_layer_get_layer(s_detail_in_layer));
-
-    // Separator
-    s_separator_layer = layer_create(GRect(0, half_height, bounds.size.w, 2));
-    layer_set_update_proc(s_separator_layer, separator_update_proc);
-    layer_add_child(window_layer, s_separator_layer);
-
-    // Bottom Layer (Outbound)
-    s_detail_out_layer = text_layer_create(GRect(4, half_height + 6, bounds.size.w - 8, half_height - 10));
-    text_layer_set_text(s_detail_out_layer, s_out_buffer);
-    text_layer_set_font(s_detail_out_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
-    text_layer_set_text_alignment(s_detail_out_layer, GTextAlignmentCenter);
-    text_layer_set_overflow_mode(s_detail_out_layer, GTextOverflowModeWordWrap);
-    text_layer_set_background_color(s_detail_out_layer, GColorBlack);
-    text_layer_set_text_color(s_detail_out_layer, GColorWhite);
-    layer_add_child(window_layer, text_layer_get_layer(s_detail_out_layer));
-}
-
-static void detail_window_unload(Window *window) {
-    text_layer_destroy(s_detail_in_layer);
-    text_layer_destroy(s_detail_out_layer);
-    layer_destroy(s_separator_layer);
 }
 
 // --- Schedule Window (menu for bus times) ---
@@ -202,19 +126,22 @@ static GColor get_route_color(const char *route_number) {
 }
 #endif
 
-// Sends a message to the JS side to request stop estimates for a stopCode/date
-static void send_stop_estimates_request(const char *stop_code, const char *date_str) {
+// Sends a message to the JS side to request stop estimates for the selected route.
+// The outbox may still be busy with a location request, so retry until it goes out.
+static void send_stop_estimates_request(void *data) {
+    s_schedule_retry_timer = NULL;
+
     DictionaryIterator *out_iter;
     AppMessageResult result = app_message_outbox_begin(&out_iter);
 
     if (result == APP_MSG_OK) {
-        dict_write_uint8(out_iter, 100, 1);
-        dict_write_cstring(out_iter, 101, stop_code);
-        dict_write_cstring(out_iter, 102, date_str);
-        if (s_selected_route_number[0] != '\0') {
-            dict_write_cstring(out_iter, 103, s_selected_route_number);
-        }
-        app_message_outbox_send();
+        dict_write_uint8(out_iter, KEY_REQUEST_SCHEDULE, 1);
+        dict_write_cstring(out_iter, KEY_ROUTE, s_selected_route_number);
+        result = app_message_outbox_send();
+    }
+
+    if (result != APP_MSG_OK) {
+        s_schedule_retry_timer = app_timer_register(SCHEDULE_RETRY_MS, send_stop_estimates_request, NULL);
     }
 }
 
@@ -250,7 +177,7 @@ static void schedule_window_load(Window *window) {
     if (s_selected_route_number[0] != '\0') {
         GColor sched_color = get_route_color(s_selected_route_number);
         text_layer_set_background_color(s_schedule_title_layer, sched_color);
-        text_layer_set_text_color(s_schedule_title_layer, GColorBlack);
+        text_layer_set_text_color(s_schedule_title_layer, gcolor_legible_over(sched_color));
     } else {
         text_layer_set_background_color(s_schedule_title_layer, GColorBlack);
         text_layer_set_text_color(s_schedule_title_layer, GColorWhite);
@@ -278,11 +205,14 @@ static void schedule_window_load(Window *window) {
     s_schedule_status[sizeof(s_schedule_status) - 1] = '\0';
     menu_layer_reload_data(s_schedule_menu_layer);
 
-    // For now: fixed stopCode/date per request
-    send_stop_estimates_request("173", "2026-03-03");
+    send_stop_estimates_request(NULL);
 }
 
 static void schedule_window_unload(Window *window) {
+    if (s_schedule_retry_timer) {
+        app_timer_cancel(s_schedule_retry_timer);
+        s_schedule_retry_timer = NULL;
+    }
     text_layer_destroy(s_schedule_title_layer);
     menu_layer_destroy(s_schedule_menu_layer);
     s_schedule_title_layer = NULL;
@@ -353,11 +283,13 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
         route_number[rn_len] = '\0';
 
         GColor route_color = get_route_color(route_number);
+        GColor line_color = GColorBlack;
         if (menu_cell_layer_is_highlighted(cell_layer)) {
-            // Full route color highlight
+            // Full route color highlight, with text that stays readable on light route colors
+            line_color = gcolor_legible_over(route_color);
             graphics_context_set_fill_color(ctx, route_color);
             graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-            graphics_context_set_text_color(ctx, GColorWhite);
+            graphics_context_set_text_color(ctx, line_color);
         } else {
             // Route color bar for normal state
             graphics_context_set_fill_color(ctx, route_color);
@@ -376,11 +308,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
 
         // Draw Separator Line
 #ifdef PBL_COLOR
-        if (menu_cell_layer_is_highlighted(cell_layer)) {
-            graphics_context_set_stroke_color(ctx, GColorWhite);
-        } else {
-            graphics_context_set_stroke_color(ctx, GColorBlack);
-        }
+        graphics_context_set_stroke_color(ctx, line_color);
 #else
         graphics_context_set_stroke_color(ctx, menu_cell_layer_is_highlighted(cell_layer) ? GColorWhite : GColorBlack);
 #endif
@@ -422,48 +350,56 @@ static void send_location_request(void) {
     AppMessageResult result = app_message_outbox_begin(&out_iter);
 
     if (result == APP_MSG_OK) {
-        dict_write_uint8(out_iter, 99, 1);
+        dict_write_uint8(out_iter, KEY_REQUEST_NEARBY, 1);
         app_message_outbox_send();
     }
 }
 
+// Shows a message in place of the route list
+static void show_status(const char *text) {
+    strncpy(s_status_buffer, text, sizeof(s_status_buffer) - 1);
+    s_status_buffer[sizeof(s_status_buffer) - 1] = '\0';
+    text_layer_set_text(s_status_layer, s_status_buffer);
+    layer_set_hidden(text_layer_get_layer(s_status_layer), false);
+    layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
+}
+
 // Handles incoming messages from the JS side, parses the bus data string into cards, and updates the UI
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
-    Tuple *bus_tuple = dict_find(iterator, 2);
-    Tuple *schedule_tuple = dict_find(iterator, 3);
+    Tuple *bus_tuple = dict_find(iterator, KEY_CARDS);
+    Tuple *schedule_tuple = dict_find(iterator, KEY_SCHEDULE);
+    Tuple *status_tuple = dict_find(iterator, KEY_STATUS);
 
     if (bus_tuple) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Got message: %s", bus_tuple->value->cstring);
         const char *bus_data = bus_tuple->value->cstring;
 
         // Clear previous buffers
-        for (int i = 0; i < MAX_CARDS; i++) {
-            memset(s_card_buffers[i], 0, sizeof(s_card_buffers[i]));
-        }
+        memset(s_card_buffers, 0, sizeof(s_card_buffers));
         s_card_count = 0;
 
-        // Simple approach: just split into cards and display (up to MAX_CARDS)
-        int card_idx = 0;
+        // Split into cards on double newlines (up to MAX_CARDS)
         int buf_pos = 0;
 
-        for (size_t i = 0; bus_data[i] != '\0' && card_idx < MAX_CARDS; i++) {
+        for (size_t i = 0; bus_data[i] != '\0' && s_card_count < MAX_CARDS; i++) {
             // If we hit a double newline, move to next card
             if (bus_data[i] == '\n' && bus_data[i+1] == '\n') {
-                s_card_count++;
-                card_idx++;
-                buf_pos = 0;
+                if (buf_pos > 0) {
+                    s_card_count++;
+                    buf_pos = 0;
+                }
                 i++; // Skip both newlines
                 continue;
             }
 
             // Add character to current card buffer
             if (buf_pos < (int)sizeof(s_card_buffers[0]) - 1) {
-                s_card_buffers[card_idx][buf_pos++] = bus_data[i];
+                s_card_buffers[s_card_count][buf_pos++] = bus_data[i];
             }
         }
 
         // Count the last card if it has content
-        if (buf_pos > 0) {
+        if (buf_pos > 0 && s_card_count < MAX_CARDS) {
             s_card_count++;
         }
 
@@ -471,20 +407,35 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
         // Hide loading indicator if we have data
         if (s_card_count > 0) {
-             text_layer_set_text(s_status_layer, "");
-             layer_set_hidden(text_layer_get_layer(s_status_layer), true);
-             layer_set_hidden(menu_layer_get_layer(s_menu_layer), false);
+            layer_set_hidden(text_layer_get_layer(s_status_layer), true);
+            layer_set_hidden(menu_layer_get_layer(s_menu_layer), false);
         } else {
-             text_layer_set_text(s_status_layer, "No data");
-             layer_set_hidden(text_layer_get_layer(s_status_layer), false);
-             layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
+            show_status("No data");
         }
 
-        // Reload menu data
+        // Reload menu data, keeping the selection inside the new list
         menu_layer_reload_data(s_menu_layer);
+        MenuIndex selected = menu_layer_get_selected_index(s_menu_layer);
+        if (s_card_count > 0 && selected.row >= s_card_count) {
+            menu_layer_set_selected_index(s_menu_layer, MenuIndex(0, s_card_count - 1), MenuRowAlignBottom, false);
+        }
+
+    } else if (status_tuple) {
+        // No routes to show (nothing nearby, or the phone couldn't fetch them)
+        APP_LOG(APP_LOG_LEVEL_INFO, "Got status: %s", status_tuple->value->cstring);
+        s_card_count = 0;
+        menu_layer_reload_data(s_menu_layer);
+        show_status(status_tuple->value->cstring);
 
     } else if (!schedule_tuple) {
         APP_LOG(APP_LOG_LEVEL_ERROR, "No known tuple found");
+    }
+
+    // Ignore schedules that aren't for the route currently on screen
+    Tuple *route_tuple = dict_find(iterator, KEY_ROUTE);
+    if (schedule_tuple && (!s_schedule_menu_layer ||
+            (route_tuple && strcmp(route_tuple->value->cstring, s_selected_route_number) != 0))) {
+        schedule_tuple = NULL;
     }
 
     if (schedule_tuple) {
@@ -532,9 +483,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
             }
         }
 
-        if (s_schedule_menu_layer) {
-            menu_layer_reload_data(s_schedule_menu_layer);
-        }
+        menu_layer_reload_data(s_schedule_menu_layer);
     }
 }
 
@@ -543,15 +492,8 @@ static void inbox_dropped_callback(AppMessageResult reason, void *context) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Message dropped");
 }
 
-// Periodically requests updates (every 30 seconds) and shows a loading state
+// Periodically requests updates (every 30 seconds)
 static void timer_callback(void *data) {
-    // Show loading indicator if menu is empty or just refresh
-    if (s_card_count == 0) {
-        text_layer_set_text(s_status_layer, "Loading...");
-        layer_set_hidden(text_layer_get_layer(s_status_layer), false);
-        layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
-    }
-    
     send_location_request();
     app_timer_register(30000, timer_callback, NULL);
 }
@@ -570,8 +512,8 @@ static void window_load(Window *window) {
     layer_add_child(s_window_layer, text_layer_get_layer(s_time_layer));
 
     // Status layer (for loading indicator) - Center it
-    s_status_layer = text_layer_create(GRect(0, 60, bounds.size.w, 30));
-    text_layer_set_text(s_status_layer, "Loading...");
+    s_status_layer = text_layer_create(GRect(4, 60, bounds.size.w - 8, 66));
+    text_layer_set_text(s_status_layer, s_status_buffer);
     text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
     text_layer_set_background_color(s_status_layer, GColorWhite);
@@ -611,13 +553,6 @@ static void init(void) {
         .unload = window_unload,
     });
     
-    // Create Detail Window
-    s_detail_window = window_create();
-    window_set_window_handlers(s_detail_window, (WindowHandlers) {
-        .load = detail_window_load,
-        .unload = detail_window_unload,
-    });
-
     // Create Schedule Window (menu for scheduled times per route)
     s_schedule_window = window_create();
     window_set_window_handlers(s_schedule_window, (WindowHandlers) {
@@ -642,7 +577,6 @@ static void init(void) {
 // Cleans up the main window on app exit
 static void deinit(void) {
     window_destroy(s_main_window);
-    window_destroy(s_detail_window);
     window_destroy(s_schedule_window);
 }
 

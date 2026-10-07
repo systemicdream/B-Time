@@ -1,0 +1,39 @@
+{
+  "name": "b-time",
+  "author": "Brandon Strege",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "B-Time",
+    "uuid": "a36783c7-070c-4726-b2c3-e82fe7b2c547",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "capabilities": [
+      "location"
+    ],
+    "messageKeys": [],
+    "resources": {
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "MENU_ICON",
+          "file": "btimeicon.png",
+          "menuIcon": true
+        }
+      ]
+    }
+  }
+}
