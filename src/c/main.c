@@ -3,15 +3,17 @@
 #define MAX_CARDS 20  // the maximum number of routes that will be down at a time
 #define MAX_SCHEDULE_ITEMS 25
 
-// AppMessage keys (must match src/pkjs/index.js)
-#define KEY_CARDS 2
-#define KEY_SCHEDULE 3
-#define KEY_STATUS 4
-#define KEY_REQUEST_NEARBY 99
-#define KEY_REQUEST_SCHEDULE 100
-#define KEY_ROUTE 103
+// AppMessage keys come from "messageKeys" in package.json (MESSAGE_KEY_*)
 
 #define SCHEDULE_RETRY_MS 500
+
+// One route in the main list, parsed from a "number name\nline1\nline2" card
+typedef struct {
+    char number[8];   // e.g. "14"
+    char title[64];   // e.g. "14 Park/Forest/MLK"
+    char inbound[32]; // e.g. "In: 5m*"
+    char outbound[32];
+} Card;
 
 static Window *s_main_window;
 static Layer *s_window_layer;
@@ -27,8 +29,16 @@ static int s_selected_route_index = -1;  // Which route was tapped; -1 = none
 static char s_selected_route_number[8] = ""; // Parsed from card title (e.g. "14")
 
 static int s_card_count = 0;
-static char s_card_buffers[MAX_CARDS][256];
-static char s_status_buffer[64] = "Loading...";
+static Card s_cards[MAX_CARDS];
+static char s_status_buffer[64] = "";
+
+// Indeterminate loading bar shown until the first routes (or a status) arrive
+#define LOADING_FRAME_MS 33
+#define LOADING_STEP_PX 3
+static Layer *s_loading_layer;
+static AppTimer *s_loading_timer;
+static int s_loading_pos = 0;  // left edge of the moving segment, relative to the track
+static int s_loading_dir = 1;
 
 static int s_schedule_count = 0;
 static char s_schedule_items[MAX_SCHEDULE_ITEMS][32];
@@ -101,28 +111,25 @@ static void schedule_select_callback(MenuLayer *menu_layer, MenuIndex *cell_inde
 }
 
 #ifdef PBL_COLOR
+static const struct {
+    const char *number;
+    uint32_t hex;
+} ROUTE_COLORS[] = {
+    { "2",  0x724D00 }, { "3",  0x61A4D5 }, { "4",  0x91BC64 }, { "5",  0xB15F51 },
+    { "7",  0xCF896F }, { "8",  0x9574B1 }, { "9",  0x9574B1 }, { "9C", 0x9574B1 },
+    { "14", 0x9574B1 }, { "15", 0x077239 }, { "16", 0xFDBE16 }, { "17", 0xA97A10 },
+    { "20", 0xEA2327 }, { "24", 0x0A984A }, { "25", 0x068AC7 }, { "26", 0x7861A7 },
+    { "27", 0xCD0779 }, { "30", 0xF59C1F }, { "32", 0x684F47 }, { "41", 0x4D6DA8 },
+};
+
 static GColor get_route_color(const char *route_number) {
-    if (strcmp(route_number, "2") == 0) return GColorFromHEX(0x724D00);
-    if (strcmp(route_number, "3") == 0) return GColorFromHEX(0x61A4D5);
-    if (strcmp(route_number, "4") == 0) return GColorFromHEX(0x91BC64);
-    if (strcmp(route_number, "5") == 0) return GColorFromHEX(0xB15F51);
-    if (strcmp(route_number, "7") == 0) return GColorFromHEX(0xCF896F);
-    if (strcmp(route_number, "8") == 0) return GColorFromHEX(0x9574B1);
-    if (strcmp(route_number, "9") == 0) return GColorFromHEX(0x9574B1);
-    if (strcmp(route_number, "9c") == 0) return GColorFromHEX(0x9574B1);
-    if (strcmp(route_number, "14") == 0) return GColorFromHEX(0x9574B1);
-    if (strcmp(route_number, "15") == 0) return GColorFromHEX(0x077239);
-    if (strcmp(route_number, "16") == 0) return GColorFromHEX(0xFDBE16);
-    if (strcmp(route_number, "17") == 0) return GColorFromHEX(0xA97A10);
-    if (strcmp(route_number, "20") == 0) return GColorFromHEX(0xEA2327);
-    if (strcmp(route_number, "24") == 0) return GColorFromHEX(0x0A984A);
-    if (strcmp(route_number, "25") == 0) return GColorFromHEX(0x068AC7);
-    if (strcmp(route_number, "26") == 0) return GColorFromHEX(0x7861A7);
-    if (strcmp(route_number, "27") == 0) return GColorFromHEX(0xCD0779);
-    if (strcmp(route_number, "30") == 0) return GColorFromHEX(0xF59C1F);
-    if (strcmp(route_number, "32") == 0) return GColorFromHEX(0x684F47);
-    if (strcmp(route_number, "41") == 0) return GColorFromHEX(0x4D6DA8);
-    return GColorWhite;
+    for (size_t i = 0; i < ARRAY_LENGTH(ROUTE_COLORS); i++) {
+        if (strcmp(route_number, ROUTE_COLORS[i].number) == 0) {
+            return GColorFromHEX(ROUTE_COLORS[i].hex);
+        }
+    }
+    // Unlisted routes still need a color that shows up as a highlight on the white menu
+    return GColorDarkGray;
 }
 #endif
 
@@ -135,8 +142,8 @@ static void send_stop_estimates_request(void *data) {
     AppMessageResult result = app_message_outbox_begin(&out_iter);
 
     if (result == APP_MSG_OK) {
-        dict_write_uint8(out_iter, KEY_REQUEST_SCHEDULE, 1);
-        dict_write_cstring(out_iter, KEY_ROUTE, s_selected_route_number);
+        dict_write_uint8(out_iter, MESSAGE_KEY_REQUEST_SCHEDULE, 1);
+        dict_write_cstring(out_iter, MESSAGE_KEY_ROUTE, s_selected_route_number);
         result = app_message_outbox_send();
     }
 
@@ -153,20 +160,11 @@ static void schedule_window_load(Window *window) {
 
     const int title_height = 28;
 
-    // Title: show selected route name
-    static char title_buf[64] = "Schedule";
+    // Title: show selected route name (copied, since the card list can refresh underneath us)
+    static char title_buf[sizeof(((Card *)0)->title)] = "Schedule";
     if (s_selected_route_index >= 0 && s_selected_route_index < s_card_count) {
-        const char *card = s_card_buffers[s_selected_route_index];
-        char *first_nl = strchr(card, '\n');
-        if (first_nl) {
-            int len = first_nl - card;
-            if (len > (int)sizeof(title_buf) - 1) len = sizeof(title_buf) - 1;
-            strncpy(title_buf, card, len);
-            title_buf[len] = '\0';
-        } else {
-            strncpy(title_buf, card, sizeof(title_buf) - 1);
-            title_buf[sizeof(title_buf) - 1] = '\0';
-        }
+        strncpy(title_buf, s_cards[s_selected_route_index].title, sizeof(title_buf) - 1);
+        title_buf[sizeof(title_buf) - 1] = '\0';
     }
 
     s_schedule_title_layer = text_layer_create(GRect(0, 0, bounds.size.w, title_height));
@@ -239,50 +237,12 @@ static int16_t menu_get_cell_height_callback(MenuLayer *menu_layer, MenuIndex *c
 // Menu callback: Draw row
 static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuIndex *cell_index, void *data) {
     if (cell_index->row < s_card_count) {
-        char *text = s_card_buffers[cell_index->row];
+        const Card *card = &s_cards[cell_index->row];
         GRect bounds = layer_get_bounds(cell_layer);
-        
-        // Parse strings
-        char title[64] = "";
-        char inbound[128] = "";
-        char outbound[128] = "";
-        
-        char *first_newline = strchr(text, '\n');
-        if (first_newline) {
-            int title_len = first_newline - text;
-            if (title_len > (int)sizeof(title) - 1) title_len = sizeof(title) - 1;
-            strncpy(title, text, title_len);
-            title[title_len] = '\0';
-            
-            char *second_newline = strchr(first_newline + 1, '\n');
-            if (second_newline) {
-                int in_len = second_newline - (first_newline + 1);
-                if (in_len > (int)sizeof(inbound) - 1) in_len = sizeof(inbound) - 1;
-                strncpy(inbound, first_newline + 1, in_len);
-                inbound[in_len] = '\0';
-                
-                strncpy(outbound, second_newline + 1, sizeof(outbound) - 1);
-                outbound[sizeof(outbound) - 1] = '\0';
-            } else {
-                strncpy(inbound, first_newline + 1, sizeof(inbound) - 1);
-                inbound[sizeof(inbound) - 1] = '\0';
-            }
-        } else {
-            strncpy(title, text, sizeof(title) - 1);
-            title[sizeof(title) - 1] = '\0';
-        }
 
         int left_pad = 4;
 #ifdef PBL_COLOR
-        // Extract route number from title (before first space)
-        char route_number[8] = "";
-        int rn_len = 0;
-        for (int i = 0; title[i] != '\0' && title[i] != ' ' && rn_len < (int)sizeof(route_number) - 1; i++) {
-            route_number[rn_len++] = title[i];
-        }
-        route_number[rn_len] = '\0';
-
-        GColor route_color = get_route_color(route_number);
+        GColor route_color = get_route_color(card->number);
         GColor line_color = GColorBlack;
         if (menu_cell_layer_is_highlighted(cell_layer)) {
             // Full route color highlight, with text that stays readable on light route colors
@@ -299,11 +259,11 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
 #endif
 
         // Draw Route Name (Title)
-        graphics_draw_text(ctx, title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
+        graphics_draw_text(ctx, card->title, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), 
                            GRect(left_pad, 5, bounds.size.w - left_pad - 4, 28), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Inbound
-        graphics_draw_text(ctx, inbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
+        graphics_draw_text(ctx, card->inbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
                            GRect(left_pad, 35, bounds.size.w - left_pad - 4, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
         // Draw Separator Line
@@ -315,7 +275,7 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
         graphics_draw_line(ctx, GPoint(left_pad, 70), GPoint(bounds.size.w - 4, 70));
 
         // Draw Outbound
-        graphics_draw_text(ctx, outbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
+        graphics_draw_text(ctx, card->outbound, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD), 
                            GRect(left_pad, 75, bounds.size.w - left_pad - 4, 30), GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
     }
 }
@@ -324,19 +284,9 @@ static void menu_draw_row_callback(GContext* ctx, const Layer *cell_layer, MenuI
 static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data) {
     if (cell_index->row < s_card_count) {
         s_selected_route_index = (int)cell_index->row;
-
-        // Parse route number from the card title ("14 Park/Forest/MLK" => "14")
-        s_selected_route_number[0] = '\0';
-        const char *card = s_card_buffers[s_selected_route_index];
-        if (card) {
-            int out_i = 0;
-            for (int i = 0; card[i] != '\0' && card[i] != ' ' && card[i] != '\n'; i++) {
-                if (out_i < (int)sizeof(s_selected_route_number) - 1) {
-                    s_selected_route_number[out_i++] = card[i];
-                }
-            }
-            s_selected_route_number[out_i] = '\0';
-        }
+        strncpy(s_selected_route_number, s_cards[s_selected_route_index].number,
+                sizeof(s_selected_route_number) - 1);
+        s_selected_route_number[sizeof(s_selected_route_number) - 1] = '\0';
 
         window_stack_push(s_schedule_window, true);
     }
@@ -350,13 +300,57 @@ static void send_location_request(void) {
     AppMessageResult result = app_message_outbox_begin(&out_iter);
 
     if (result == APP_MSG_OK) {
-        dict_write_uint8(out_iter, KEY_REQUEST_NEARBY, 1);
+        dict_write_uint8(out_iter, MESSAGE_KEY_REQUEST_NEARBY, 1);
         app_message_outbox_send();
     }
 }
 
 // Shows a message in place of the route list
+static void loading_layer_update_proc(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    int seg_w = bounds.size.w / 3;
+
+    // Track
+#ifdef PBL_COLOR
+    graphics_context_set_fill_color(ctx, GColorLightGray);
+    graphics_fill_rect(ctx, bounds, bounds.size.h / 2, GCornersAll);
+#else
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_draw_round_rect(ctx, bounds, bounds.size.h / 2);
+#endif
+
+    // Moving segment
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(s_loading_pos, 0, seg_w, bounds.size.h),
+                       bounds.size.h / 2, GCornersAll);
+}
+
+// Advances the segment one frame, bouncing between the ends of the track
+static void loading_timer_callback(void *data) {
+    int max_pos = layer_get_bounds(s_loading_layer).size.w - layer_get_bounds(s_loading_layer).size.w / 3;
+    s_loading_pos += s_loading_dir * LOADING_STEP_PX;
+    if (s_loading_pos <= 0) {
+        s_loading_pos = 0;
+        s_loading_dir = 1;
+    } else if (s_loading_pos >= max_pos) {
+        s_loading_pos = max_pos;
+        s_loading_dir = -1;
+    }
+    layer_mark_dirty(s_loading_layer);
+    s_loading_timer = app_timer_register(LOADING_FRAME_MS, loading_timer_callback, NULL);
+}
+
+// Stops the animation (no point redrawing, or using battery, once it's hidden)
+static void hide_loading(void) {
+    if (s_loading_timer) {
+        app_timer_cancel(s_loading_timer);
+        s_loading_timer = NULL;
+    }
+    layer_set_hidden(s_loading_layer, true);
+}
+
 static void show_status(const char *text) {
+    hide_loading();
     strncpy(s_status_buffer, text, sizeof(s_status_buffer) - 1);
     s_status_buffer[sizeof(s_status_buffer) - 1] = '\0';
     text_layer_set_text(s_status_layer, s_status_buffer);
@@ -364,49 +358,67 @@ static void show_status(const char *text) {
     layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
 }
 
+// Copies len chars of src into dst, truncating to fit and always terminating
+static void copy_span(char *dst, size_t size, const char *src, size_t len) {
+    if (len > size - 1) len = size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+// Parses one card ("14 Park/Forest/MLK\nIn: 5m*\nOut: 12m") of len chars into its fields
+static void parse_card(Card *card, const char *text, size_t len) {
+    memset(card, 0, sizeof(*card));
+
+    struct { char *dst; size_t size; } lines[] = {
+        { card->title, sizeof(card->title) },
+        { card->inbound, sizeof(card->inbound) },
+        { card->outbound, sizeof(card->outbound) },
+    };
+
+    const char *end = text + len;
+    const char *p = text;
+    for (size_t i = 0; i < ARRAY_LENGTH(lines) && p < end; i++) {
+        const char *nl = memchr(p, '\n', end - p);
+        const char *line_end = nl ? nl : end;
+        copy_span(lines[i].dst, lines[i].size, p, line_end - p);
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    // Route number is the title up to the first space ("14 Park/Forest/MLK" => "14")
+    const char *space = strchr(card->title, ' ');
+    copy_span(card->number, sizeof(card->number), card->title,
+              space ? (size_t)(space - card->title) : strlen(card->title));
+}
+
 // Handles incoming messages from the JS side, parses the bus data string into cards, and updates the UI
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
-    Tuple *bus_tuple = dict_find(iterator, KEY_CARDS);
-    Tuple *schedule_tuple = dict_find(iterator, KEY_SCHEDULE);
-    Tuple *status_tuple = dict_find(iterator, KEY_STATUS);
+    Tuple *bus_tuple = dict_find(iterator, MESSAGE_KEY_CARDS);
+    Tuple *schedule_tuple = dict_find(iterator, MESSAGE_KEY_SCHEDULE);
+    Tuple *status_tuple = dict_find(iterator, MESSAGE_KEY_STATUS);
 
     if (bus_tuple) {
         APP_LOG(APP_LOG_LEVEL_INFO, "Got message: %s", bus_tuple->value->cstring);
         const char *bus_data = bus_tuple->value->cstring;
 
-        // Clear previous buffers
-        memset(s_card_buffers, 0, sizeof(s_card_buffers));
-        s_card_count = 0;
-
         // Split into cards on double newlines (up to MAX_CARDS)
-        int buf_pos = 0;
-
-        for (size_t i = 0; bus_data[i] != '\0' && s_card_count < MAX_CARDS; i++) {
-            // If we hit a double newline, move to next card
-            if (bus_data[i] == '\n' && bus_data[i+1] == '\n') {
-                if (buf_pos > 0) {
-                    s_card_count++;
-                    buf_pos = 0;
-                }
-                i++; // Skip both newlines
-                continue;
+        s_card_count = 0;
+        const char *p = bus_data;
+        while (*p != '\0' && s_card_count < MAX_CARDS) {
+            const char *sep = strstr(p, "\n\n");
+            size_t len = sep ? (size_t)(sep - p) : strlen(p);
+            if (len > 0) {
+                parse_card(&s_cards[s_card_count++], p, len);
             }
-
-            // Add character to current card buffer
-            if (buf_pos < (int)sizeof(s_card_buffers[0]) - 1) {
-                s_card_buffers[s_card_count][buf_pos++] = bus_data[i];
-            }
-        }
-
-        // Count the last card if it has content
-        if (buf_pos > 0 && s_card_count < MAX_CARDS) {
-            s_card_count++;
+            if (!sep) break;
+            p = sep + 2;
         }
 
         APP_LOG(APP_LOG_LEVEL_INFO, "Parsed %d cards", s_card_count);
 
         // Hide loading indicator if we have data
         if (s_card_count > 0) {
+            hide_loading();
             layer_set_hidden(text_layer_get_layer(s_status_layer), true);
             layer_set_hidden(menu_layer_get_layer(s_menu_layer), false);
         } else {
@@ -432,7 +444,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
 
     // Ignore schedules that aren't for the route currently on screen
-    Tuple *route_tuple = dict_find(iterator, KEY_ROUTE);
+    Tuple *route_tuple = dict_find(iterator, MESSAGE_KEY_ROUTE);
     if (schedule_tuple && (!s_schedule_menu_layer ||
             (route_tuple && strcmp(route_tuple->value->cstring, s_selected_route_number) != 0))) {
         schedule_tuple = NULL;
@@ -511,13 +523,25 @@ static void window_load(Window *window) {
     text_layer_set_text_color(s_time_layer, GColorWhite);
     layer_add_child(s_window_layer, text_layer_get_layer(s_time_layer));
 
-    // Status layer (for loading indicator) - Center it
+    // Status layer (errors / "no routes" messages), hidden until there's something to say
     s_status_layer = text_layer_create(GRect(4, 60, bounds.size.w - 8, 66));
     text_layer_set_text(s_status_layer, s_status_buffer);
     text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
     text_layer_set_background_color(s_status_layer, GColorWhite);
+    layer_set_hidden(text_layer_get_layer(s_status_layer), true);
     layer_add_child(s_window_layer, text_layer_get_layer(s_status_layer));
+
+    // Loading bar, centered in the area below the time
+    const int bar_w = bounds.size.w * 3 / 5;
+    const int bar_h = 6;
+    const int content_mid_y = 30 + (bounds.size.h - 30) / 2;
+    s_loading_layer = layer_create(GRect((bounds.size.w - bar_w) / 2, content_mid_y - bar_h / 2, bar_w, bar_h));
+    layer_set_update_proc(s_loading_layer, loading_layer_update_proc);
+    layer_add_child(s_window_layer, s_loading_layer);
+    s_loading_pos = 0;
+    s_loading_dir = 1;
+    s_loading_timer = app_timer_register(LOADING_FRAME_MS, loading_timer_callback, NULL);
 
     // Menu Layer (Below Time Layer)
     s_menu_layer = menu_layer_create(GRect(0, 30, bounds.size.w, bounds.size.h - 30));
@@ -542,6 +566,8 @@ static void window_load(Window *window) {
 static void window_unload(Window *window) {
     text_layer_destroy(s_time_layer);
     text_layer_destroy(s_status_layer);
+    hide_loading();
+    layer_destroy(s_loading_layer);
     menu_layer_destroy(s_menu_layer);
 }
 
