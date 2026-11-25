@@ -30,7 +30,15 @@ static char s_selected_route_number[8] = ""; // Parsed from card title (e.g. "14
 
 static int s_card_count = 0;
 static Card s_cards[MAX_CARDS];
-static char s_status_buffer[64] = "Loading...";
+static char s_status_buffer[64] = "";
+
+// Indeterminate loading bar shown until the first routes (or a status) arrive
+#define LOADING_FRAME_MS 33
+#define LOADING_STEP_PX 3
+static Layer *s_loading_layer;
+static AppTimer *s_loading_timer;
+static int s_loading_pos = 0;  // left edge of the moving segment, relative to the track
+static int s_loading_dir = 1;
 
 static int s_schedule_count = 0;
 static char s_schedule_items[MAX_SCHEDULE_ITEMS][32];
@@ -298,7 +306,51 @@ static void send_location_request(void) {
 }
 
 // Shows a message in place of the route list
+static void loading_layer_update_proc(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    int seg_w = bounds.size.w / 3;
+
+    // Track
+#ifdef PBL_COLOR
+    graphics_context_set_fill_color(ctx, GColorLightGray);
+    graphics_fill_rect(ctx, bounds, bounds.size.h / 2, GCornersAll);
+#else
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_draw_round_rect(ctx, bounds, bounds.size.h / 2);
+#endif
+
+    // Moving segment
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(s_loading_pos, 0, seg_w, bounds.size.h),
+                       bounds.size.h / 2, GCornersAll);
+}
+
+// Advances the segment one frame, bouncing between the ends of the track
+static void loading_timer_callback(void *data) {
+    int max_pos = layer_get_bounds(s_loading_layer).size.w - layer_get_bounds(s_loading_layer).size.w / 3;
+    s_loading_pos += s_loading_dir * LOADING_STEP_PX;
+    if (s_loading_pos <= 0) {
+        s_loading_pos = 0;
+        s_loading_dir = 1;
+    } else if (s_loading_pos >= max_pos) {
+        s_loading_pos = max_pos;
+        s_loading_dir = -1;
+    }
+    layer_mark_dirty(s_loading_layer);
+    s_loading_timer = app_timer_register(LOADING_FRAME_MS, loading_timer_callback, NULL);
+}
+
+// Stops the animation (no point redrawing, or using battery, once it's hidden)
+static void hide_loading(void) {
+    if (s_loading_timer) {
+        app_timer_cancel(s_loading_timer);
+        s_loading_timer = NULL;
+    }
+    layer_set_hidden(s_loading_layer, true);
+}
+
 static void show_status(const char *text) {
+    hide_loading();
     strncpy(s_status_buffer, text, sizeof(s_status_buffer) - 1);
     s_status_buffer[sizeof(s_status_buffer) - 1] = '\0';
     text_layer_set_text(s_status_layer, s_status_buffer);
@@ -366,6 +418,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
         // Hide loading indicator if we have data
         if (s_card_count > 0) {
+            hide_loading();
             layer_set_hidden(text_layer_get_layer(s_status_layer), true);
             layer_set_hidden(menu_layer_get_layer(s_menu_layer), false);
         } else {
@@ -470,13 +523,25 @@ static void window_load(Window *window) {
     text_layer_set_text_color(s_time_layer, GColorWhite);
     layer_add_child(s_window_layer, text_layer_get_layer(s_time_layer));
 
-    // Status layer (for loading indicator) - Center it
+    // Status layer (errors / "no routes" messages), hidden until there's something to say
     s_status_layer = text_layer_create(GRect(4, 60, bounds.size.w - 8, 66));
     text_layer_set_text(s_status_layer, s_status_buffer);
     text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
     text_layer_set_background_color(s_status_layer, GColorWhite);
+    layer_set_hidden(text_layer_get_layer(s_status_layer), true);
     layer_add_child(s_window_layer, text_layer_get_layer(s_status_layer));
+
+    // Loading bar, centered in the area below the time
+    const int bar_w = bounds.size.w * 3 / 5;
+    const int bar_h = 6;
+    const int content_mid_y = 30 + (bounds.size.h - 30) / 2;
+    s_loading_layer = layer_create(GRect((bounds.size.w - bar_w) / 2, content_mid_y - bar_h / 2, bar_w, bar_h));
+    layer_set_update_proc(s_loading_layer, loading_layer_update_proc);
+    layer_add_child(s_window_layer, s_loading_layer);
+    s_loading_pos = 0;
+    s_loading_dir = 1;
+    s_loading_timer = app_timer_register(LOADING_FRAME_MS, loading_timer_callback, NULL);
 
     // Menu Layer (Below Time Layer)
     s_menu_layer = menu_layer_create(GRect(0, 30, bounds.size.w, bounds.size.h - 30));
@@ -501,6 +566,8 @@ static void window_load(Window *window) {
 static void window_unload(Window *window) {
     text_layer_destroy(s_time_layer);
     text_layer_destroy(s_status_layer);
+    hide_loading();
+    layer_destroy(s_loading_layer);
     menu_layer_destroy(s_menu_layer);
 }
 

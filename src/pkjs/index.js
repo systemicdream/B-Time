@@ -320,8 +320,7 @@ function requestNearbyRoutesAndTimes() {
                     }
 
                     routeMap[r.routeKey].stops[s.directionKey] = {
-                        dirName: s.directionName,
-                        distance: s.distance // meters
+                        dirName: s.directionName
                     };
                     stopsPayload.push({
                         stopCode: s.stopCode,
