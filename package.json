@@ -24,7 +24,14 @@
     "capabilities": [
       "location"
     ],
-    "messageKeys": [],
+    "messageKeys": [
+      "CARDS",
+      "SCHEDULE",
+      "STATUS",
+      "REQUEST_NEARBY",
+      "REQUEST_SCHEDULE",
+      "ROUTE"
+    ],
     "resources": {
       "media": [
         {

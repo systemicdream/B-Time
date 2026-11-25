@@ -4,15 +4,17 @@ var API_BASE = "https://planmyride.blinetransit.com";
 var MAX_CARDS = 20;          // must match MAX_CARDS in main.c
 var MAX_SCHEDULE_ITEMS = 25; // must match MAX_SCHEDULE_ITEMS in main.c
 
-// AppMessage keys (watch -> phone)
-var KEY_REQUEST_NEARBY = 99;
-var KEY_REQUEST_SCHEDULE = 100;
-// AppMessage keys (phone -> watch)
-var KEY_CARDS = 2;
-var KEY_SCHEDULE = 3;
-var KEY_STATUS = 4;
+// AppMessage keys, declared in "messageKeys" in package.json. Use the names, not the
+// numeric IDs: the iOS app only labels incoming payloads by name.
+// watch -> phone
+var KEY_REQUEST_NEARBY = "REQUEST_NEARBY";
+var KEY_REQUEST_SCHEDULE = "REQUEST_SCHEDULE";
+// phone -> watch
+var KEY_CARDS = "CARDS";
+var KEY_SCHEDULE = "SCHEDULE";
+var KEY_STATUS = "STATUS";
 // Route number: sent with a schedule request and echoed back with the schedule
-var KEY_ROUTE = 103;
+var KEY_ROUTE = "ROUTE";
 
 Pebble.addEventListener("ready", function() {
     console.log("Ready");
