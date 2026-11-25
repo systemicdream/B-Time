@@ -2,6 +2,7 @@
   "name": "b-time",
   "author": "Brandon Strege",
   "version": "2.0.0",
+  "license": "MIT",
   "keywords": ["pebble-app"],
   "private": true,
   "dependencies": {},

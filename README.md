@@ -55,3 +55,12 @@ pebble install --emulator basalt
 ```
 
 > **Note:** Location access is required on the paired phone to find nearby B-Line stops.
+
+## Disclaimer
+
+B-Time is an unofficial, independent project and is not affiliated with, endorsed by, or connected to Butte Regional Transit (B-Line). Transit data is fetched from the public B-Line Plan My Ride service and may change without notice.
+
+## License
+
+[MIT](LICENSE)
+
